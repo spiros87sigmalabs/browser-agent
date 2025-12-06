@@ -1,9 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import os
 
-from browser_use import Agent, ChatOpenAI
-from browser_use.browser import BrowserProfile  # ← ΣΩΣΤΟ ΤΩΡΑ
+# ΣΩΣΤΟ IMPORT – από browser_use.llms
+from browser_use import Agent
+from browser_use.llms import ChatBrowserUse  # ΑΥΤΟ ΕΙΝΑΙ ΤΟ ΣΩΣΤΟ!
 
 app = FastAPI(title="Browser Agent Service")
 
@@ -25,9 +27,10 @@ class TaskRequest(BaseModel):
 @app.post("/execute")
 async def execute_task(request: TaskRequest):
     try:
-        llm = ChatOpenAI(
-            model="gpt-5-mini",
-            api_key=request.openai_api_key
+        # Χρησιμοποιούμε το NATIVE LLM της browser-use
+        llm = ChatBrowserUse(
+            model="gpt-4o-mini",
+            openai_api_key=request.openai_api_key
         )
 
         full_task = f"""
@@ -35,25 +38,23 @@ async def execute_task(request: TaskRequest):
         Username: {request.wp_user}
         Password: {request.wp_pass}
 
-        ΕΡΓΑΣΙΑ: {request.task}
+        ΕΡΓΑΣΙΑ:
+        {request.task}
 
-        ΒΗΜΑΤΑ:
-        1. Πήγαινε στο {request.wp_url}/wp-admin
-        2. Login με τα στοιχεία
-        3. Κάνε την εργασία
-        4. Γράψε τι έκανες
+        Κάνε login στο /wp-admin και εκτέλεσε βήμα-βήμα.
+        Στο τέλος γράψε τι έκανες.
         """
 
         agent = Agent(
             task=full_task,
             llm=llm,
             use_vision=True,
-            browser_profile=BrowserProfile(  # ← ΣΩΣΤΟ!
-                headless=False,       # βλέπεις το Chrome
-                slow_mo=1000,         # αργές κινήσεις
-                timeout=45000,        # μεγάλο timeout
-                wait_until="networkidle"
-            )
+            browser_profile={
+                "headless": False,
+                "slow_mo": 300,
+                "timeout": 30000,
+                "wait_until": "domcontentloaded"
+            }
         )
 
         result = await agent.run()
@@ -64,8 +65,8 @@ async def execute_task(request: TaskRequest):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "message": "LIVE & READY!"}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
