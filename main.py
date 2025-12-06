@@ -2,10 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
-import asyncio
-
-# ΣΩΣΤΑ IMPORTS από browser-use (από official README)
-from browser_use import Agent, ChatBrowserUse, Browser
+from langchain_openai import ChatOpenAI
+from browser_use import Agent
 
 app = FastAPI(title="Browser Agent Service")
 
@@ -27,38 +25,35 @@ class TaskRequest(BaseModel):
 @app.post("/execute")
 async def execute_task(request: TaskRequest):
     try:
-        # Native LLM από browser-use (δεν χρειάζεται key αν είναι default, αλλά βάζουμε για OpenAI)
-        llm = ChatBrowserUse(
+        # Χρησιμοποιούμε LangChain ChatOpenAI (όπως στο official documentation)
+        llm = ChatOpenAI(
             model="gpt-4o-mini",
-            openai_api_key=request.openai_api_key
+            api_key=request.openai_api_key
         )
-
-        # Browser instance (για καλύτερο control)
-        browser = Browser()
-
+        
         full_task = f"""
         WordPress URL: {request.wp_url}
         Username: {request.wp_user}
         Password: {request.wp_pass}
-
+        
         ΕΡΓΑΣΙΑ:
         {request.task}
-
+        
         Κάνε login στο /wp-admin και εκτέλεσε βήμα-βήμα.
         Στο τέλος γράψε τι έκανες.
         """
-
+        
+        # Δημιουργία agent με το LangChain LLM
         agent = Agent(
             task=full_task,
             llm=llm,
-            browser=browser,
             use_vision=True
         )
-
+        
         result = await agent.run()
-
+        
         return {"success": True, "result": str(result)}
-
+        
     except Exception as e:
         return {"success": False, "error": str(e)}
 
