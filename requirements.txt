@@ -3,4 +3,4 @@ uvicorn[standard]
 pydantic
 browser-use
 langchain-openai
-playwrig
+playwright
