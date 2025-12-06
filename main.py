@@ -2,10 +2,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
+import asyncio
 
-# ΣΩΣΤΟ IMPORT – από browser_use.llms
-from browser_use import Agent
-from browser_use.llms import ChatBrowserUse  # ΑΥΤΟ ΕΙΝΑΙ ΤΟ ΣΩΣΤΟ!
+# ΣΩΣΤΑ IMPORTS από browser-use (από official README)
+from browser_use import Agent, ChatBrowserUse, Browser
 
 app = FastAPI(title="Browser Agent Service")
 
@@ -27,11 +27,14 @@ class TaskRequest(BaseModel):
 @app.post("/execute")
 async def execute_task(request: TaskRequest):
     try:
-        # Χρησιμοποιούμε το NATIVE LLM της browser-use
+        # Native LLM από browser-use (δεν χρειάζεται key αν είναι default, αλλά βάζουμε για OpenAI)
         llm = ChatBrowserUse(
             model="gpt-4o-mini",
             openai_api_key=request.openai_api_key
         )
+
+        # Browser instance (για καλύτερο control)
+        browser = Browser()
 
         full_task = f"""
         WordPress URL: {request.wp_url}
@@ -48,16 +51,12 @@ async def execute_task(request: TaskRequest):
         agent = Agent(
             task=full_task,
             llm=llm,
-            use_vision=True,
-            browser_profile={
-                "headless": False,
-                "slow_mo": 300,
-                "timeout": 30000,
-                "wait_until": "domcontentloaded"
-            }
+            browser=browser,
+            use_vision=True
         )
 
         result = await agent.run()
+
         return {"success": True, "result": str(result)}
 
     except Exception as e:
