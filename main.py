@@ -6,8 +6,8 @@ import os
 import json
 import asyncio
 import logging
-import sys
-from io import StringIO
+import re
+import gc
 
 from browser_use import Agent, ChatOpenAI
 from browser_use.browser import BrowserProfile
@@ -29,8 +29,40 @@ class TaskRequest(BaseModel):
     wp_pass: str
     openai_api_key: str
 
+def parse_log_line(line: str):
+    """Parse log line"""
+    clean = re.sub(r'\x1b\[[0-9;]*m', '', line)
+    
+    if not clean.strip():
+        return None, None, 0
+    
+    step = 0
+    step_match = re.search(r'Step (\d+)', clean)
+    if step_match:
+        step = int(step_match.group(1))
+    
+    if '📍 Step' in clean:
+        return 'step', clean.strip(), step
+    elif '👍 Eval:' in clean and ('Success' in clean or 'successfully' in clean):
+        return 'eval', clean.strip(), step
+    elif '⚠️ Eval:' in clean or 'Failure' in clean:
+        return 'warning', clean.strip(), step
+    elif '🧠' in clean and '[Agent]' in clean:
+        return 'memory', clean.strip(), step
+    elif '🎯' in clean and 'Task:' not in clean:
+        return 'goal', clean.strip(), step
+    elif '▶️' in clean or '⌨️' in clean or '🖱️' in clean or '🧭' in clean:
+        return 'action', clean.strip(), step
+    elif '❌' in clean or 'ERROR' in clean or 'Failed' in clean:
+        return 'error', clean.strip(), step
+    elif '✅' in clean:
+        return 'success', clean.strip(), step
+    elif 'Starting' in clean or 'Downloading' in clean or 'viewport' in clean:
+        return 'system', clean.strip(), step
+    else:
+        return 'info', clean.strip(), step
+
 class LogCapture(logging.Handler):
-    """Custom handler που capture τα logs του browser_use"""
     def __init__(self, queue):
         super().__init__()
         self.queue = queue
@@ -38,189 +70,147 @@ class LogCapture(logging.Handler):
     def emit(self, record):
         try:
             msg = self.format(record)
-            self.queue.put_nowait({
-                'level': record.levelname,
-                'message': msg,
-                'module': record.module
-            })
+            log_type, message, step = parse_log_line(msg)
+            if log_type and message:
+                self.queue.put_nowait({
+                    'type': log_type,
+                    'message': message,
+                    'step': step
+                })
         except:
             pass
 
 async def stream_agent_logs(request: TaskRequest):
-    """Generator με detailed streaming logs"""
+    """Streaming με memory optimization"""
+    log_queue = asyncio.Queue()
+    agent = None
+    
     try:
-        # Δημιουργία queue για logs
-        log_queue = asyncio.Queue()
+        # Setup logging
+        for logger_name in ['browser_use']:
+            logger = logging.getLogger(logger_name)
+            logger.setLevel(logging.INFO)
+            logger.handlers.clear()
+            
+            handler = LogCapture(log_queue)
+            handler.setFormatter(logging.Formatter('%(message)s'))
+            logger.addHandler(handler)
         
-        # Setup custom logger για browser_use
-        browser_logger = logging.getLogger('browser_use')
-        browser_logger.setLevel(logging.INFO)
+        yield f"data: {json.dumps({'type': 'system', 'message': '🚀 Starting...', 'step': 0})}\n\n"
         
-        # Προσθήκη custom handler
-        handler = LogCapture(log_queue)
-        handler.setFormatter(logging.Formatter('%(message)s'))
-        browser_logger.addHandler(handler)
-        
-        # Αρχικά μηνύματα
-        yield f"data: {json.dumps({'type': 'info', 'message': '🚀 Εκκίνηση AI Agent Pro...', 'step': 0})}\n\n"
-        await asyncio.sleep(0.3)
-        
-        yield f"data: {json.dumps({'type': 'info', 'message': f'🌐 Target: {request.wp_url}', 'step': 0})}\n\n"
-        await asyncio.sleep(0.3)
-        
-        # Δημιουργία LLM
+        # LLM
         llm = ChatOpenAI(
             model="gpt-4o-mini",
             api_key=request.openai_api_key
         )
         
         full_task = f"""
-WordPress URL: {request.wp_url}
-Username: {request.wp_user}
-Password: {request.wp_pass}
+WordPress: {request.wp_url}
+User: {request.wp_user}
+Pass: {request.wp_pass}
 
-ΕΡΓΑΣΙΑ: {request.task}
+TASK: {request.task}
 
-ΒΗΜΑΤΑ:
-1. Πήγαινε στο {request.wp_url}/wp-admin
-2. Συμπλήρωσε Username: {request.wp_user}
-3. Συμπλήρωσε Password: {request.wp_pass}
-4. Πάτα "Σύνδεση" ή "Log In"
-5. Εκτέλεσε την εργασία βήμα-βήμα με προσοχή
-6. Στο τέλος γράψε ΑΝΑΛΥΤΙΚΑ τι έκανες
+STEPS:
+1. Go to {request.wp_url}/wp-admin
+2. Login if needed
+3. Complete task
+4. Report what you did
 """
         
-        yield f"data: {json.dumps({'type': 'system', 'message': '🤖 Initializing AI Brain...', 'step': 0})}\n\n"
-        
-        # Δημιουργία agent
+        # MEMORY-OPTIMIZED BROWSER
         agent = Agent(
             task=full_task,
             llm=llm,
-            use_vision=True,
+            use_vision=False,  # ❌ NO VISION
             browser_profile=BrowserProfile(
                 headless=True,
-                slow_mo=500,
-                timeout=60000,
-                wait_until="networkidle",
-                disable_security=False
+                slow_mo=100,  # Faster
+                timeout=90000,  # 90s
+                wait_until="domcontentloaded",
+                disable_security=True,
+                # 🔥 MEMORY OPTIMIZATION
+                extra_chromium_args=[
+                    '--disable-dev-shm-usage',  # Μην χρησιμοποιείς /dev/shm
+                    '--disable-gpu',  # No GPU
+                    '--no-sandbox',  # No sandbox
+                    '--disable-setuid-sandbox',
+                    '--disable-extensions',  # No extensions
+                    '--disable-background-networking',
+                    '--disable-background-timer-throttling',
+                    '--disable-backgrounding-occluded-windows',
+                    '--disable-renderer-backgrounding',
+                    '--disable-sync',
+                    '--disable-translate',
+                    '--disable-features=TranslateUI',
+                    '--metrics-recording-only',
+                    '--mute-audio',
+                    '--no-first-run',
+                    '--safebrowsing-disable-auto-update',
+                    '--disable-blink-features=AutomationControlled',
+                    '--window-size=1280,720',  # Μικρότερο window
+                    '--disable-infobars',
+                ]
             )
         )
         
-        yield f"data: {json.dumps({'type': 'system', 'message': '🔥 Launching Chrome Browser...', 'step': 0})}\n\n"
-        await asyncio.sleep(0.3)
+        yield f"data: {json.dumps({'type': 'system', 'message': '🔥 Chrome ready', 'step': 0})}\n\n"
         
-        # Task για εκτέλεση agent
-        async def run_agent():
+        # Run agent
+        async def run_task():
             return await agent.run()
         
-        # Task για monitoring logs
-        async def monitor_logs():
-            step_counter = 0
+        async def stream_logs():
             while True:
                 try:
-                    log_entry = await asyncio.wait_for(log_queue.get(), timeout=0.1)
-                    
-                    msg = log_entry['message']
-                    
-                    # Parse διαφορετικά types
-                    if '📍 Step' in msg:
-                        step_counter += 1
-                        step_num = msg.split('Step')[1].split(':')[0].strip()
-                        yield f"data: {json.dumps({'type': 'step', 'message': f'📍 Step {step_num}', 'step': step_counter})}\n\n"
-                    
-                    elif '👍 Eval:' in msg:
-                        eval_text = msg.split('Eval:')[1].strip()
-                        yield f"data: {json.dumps({'type': 'eval', 'message': f'👍 {eval_text}', 'step': step_counter})}\n\n"
-                    
-                    elif '🧠 Memory:' in msg:
-                        memory_text = msg.split('Memory:')[1].strip()
-                        yield f"data: {json.dumps({'type': 'memory', 'message': f'🧠 {memory_text}', 'step': step_counter})}\n\n"
-                    
-                    elif '🎯 Next goal:' in msg:
-                        goal_text = msg.split('Next goal:')[1].strip()
-                        yield f"data: {json.dumps({'type': 'goal', 'message': f'🎯 {goal_text}', 'step': step_counter})}\n\n"
-                    
-                    elif '▶️' in msg:
-                        action_text = msg.split('▶️')[1].strip()
-                        yield f"data: {json.dumps({'type': 'action', 'message': f'▶️ {action_text}', 'step': step_counter})}\n\n"
-                    
-                    elif '🖱️' in msg or 'click' in msg.lower():
-                        yield f"data: {json.dumps({'type': 'action', 'message': f'🖱️ {msg}', 'step': step_counter})}\n\n"
-                    
-                    elif '⌨️' in msg or 'type' in msg.lower():
-                        yield f"data: {json.dumps({'type': 'action', 'message': f'⌨️ {msg}', 'step': step_counter})}\n\n"
-                    
-                    elif '🧭' in msg or 'navigate' in msg.lower():
-                        yield f"data: {json.dumps({'type': 'action', 'message': f'🧭 {msg}', 'step': step_counter})}\n\n"
-                    
-                    elif 'ERROR' in log_entry['level']:
-                        yield f"data: {json.dumps({'type': 'error', 'message': f'❌ {msg}', 'step': step_counter})}\n\n"
-                    
-                    else:
-                        # Generic info
-                        yield f"data: {json.dumps({'type': 'info', 'message': msg, 'step': step_counter})}\n\n"
-                    
-                    await asyncio.sleep(0.05)
-                    
+                    log = await asyncio.wait_for(log_queue.get(), timeout=1.0)
+                    yield log
                 except asyncio.TimeoutError:
-                    await asyncio.sleep(0.1)
-                    continue
-                except Exception as e:
-                    break
+                    yield {'type': 'info', 'message': '💭 Working...', 'step': 0}
+                    await asyncio.sleep(2)
         
-        # Εκτέλεση παράλληλα
-        agent_task = asyncio.create_task(run_agent())
+        task = asyncio.create_task(run_task())
+        log_gen = stream_logs()
         
-        # Stream logs
-        async for log_data in monitor_logs():
-            yield log_data
-            
-            # Check αν τελείωσε το agent
-            if agent_task.done():
+        while not task.done():
+            try:
+                log_data = await asyncio.wait_for(log_gen.__anext__(), timeout=3.0)
+                yield f"data: {json.dumps(log_data)}\n\n"
+            except asyncio.TimeoutError:
+                yield f"data: {json.dumps({'type': 'info', 'message': '⏳ Processing...', 'step': 0})}\n\n"
+            except StopAsyncIteration:
                 break
         
-        # Περίμενε να τελειώσει
-        result = await agent_task
+        result = await task
         
-        # Cleanup
-        browser_logger.removeHandler(handler)
+        yield f"data: {json.dumps({'type': 'success', 'message': '✅ Done!', 'step': 999})}\n\n"
         
-        # Τελικό αποτέλεσμα
-        yield f"data: {json.dumps({'type': 'success', 'message': '✅ Task Completed Successfully!', 'step': 999})}\n\n"
-        await asyncio.sleep(0.3)
-        
-        # Parse result
-        output = ""
-        if hasattr(result, 'final_result'):
-            output = str(result.final_result())
-        elif hasattr(result, 'history') and result.history:
-            output = "\n".join([str(h) for h in result.history[-5:]])
-        else:
-            output = str(result)
-        
-        # Στείλε summary
-        yield f"data: {json.dumps({'type': 'result', 'message': '📋 SUMMARY', 'step': 999})}\n\n"
-        
-        for line in output.split('\n')[:15]:
+        # Result
+        output = str(result) if result else "No output"
+        for line in output.split('\n')[:8]:
             if line.strip():
-                yield f"data: {json.dumps({'type': 'result', 'message': line.strip(), 'step': 999})}\n\n"
-                await asyncio.sleep(0.1)
+                yield f"data: {json.dumps({'type': 'result', 'message': line[:200], 'step': 999})}\n\n"
         
-        yield f"data: {json.dumps({'type': 'done', 'message': '🎉 All Done!', 'step': 999})}\n\n"
+        yield f"data: {json.dumps({'type': 'done', 'message': '🎉 Complete', 'step': 999})}\n\n"
         
     except Exception as e:
-        import traceback
-        error_msg = f"{type(e).__name__}: {str(e)}"
-        yield f"data: {json.dumps({'type': 'error', 'message': f'❌ Fatal Error: {error_msg}', 'step': 0})}\n\n"
+        yield f"data: {json.dumps({'type': 'error', 'message': f'❌ {str(e)}', 'step': 0})}\n\n"
+    
+    finally:
+        # 🔥 CLEANUP MEMORY
+        if agent:
+            try:
+                await agent.browser.close()
+            except:
+                pass
         
-        tb = traceback.format_exc()
-        for line in tb.split('\n')[:8]:
-            if line.strip():
-                yield f"data: {json.dumps({'type': 'error', 'message': line, 'step': 0})}\n\n"
+        # Force garbage collection
+        gc.collect()
+        
+        yield f"data: {json.dumps({'type': 'system', 'message': '🧹 Cleanup done', 'step': 0})}\n\n"
 
 @app.post("/execute-stream")
 async def execute_task_stream(request: TaskRequest):
-    """Streaming endpoint με detailed logs"""
     return StreamingResponse(
         stream_agent_logs(request),
         media_type="text/event-stream",
@@ -233,7 +223,7 @@ async def execute_task_stream(request: TaskRequest):
 
 @app.post("/execute")
 async def execute_task(request: TaskRequest):
-    """Regular endpoint (για backward compatibility)"""
+    agent = None
     try:
         llm = ChatOpenAI(
             model="gpt-4o-mini",
@@ -241,79 +231,57 @@ async def execute_task(request: TaskRequest):
         )
 
         full_task = f"""
-WordPress URL: {request.wp_url}
-Username: {request.wp_user}
-Password: {request.wp_pass}
-
-ΕΡΓΑΣΙΑ: {request.task}
-
-ΒΗΜΑΤΑ:
-1. Πήγαινε στο {request.wp_url}/wp-admin
-2. Συμπλήρωσε Username: {request.wp_user}
-3. Συμπλήρωσε Password: {request.wp_pass}
-4. Πάτα "Σύνδεση" ή "Log In"
-5. Εκτέλεσε την εργασία βήμα-βήμα
-6. Στο τέλος γράψε ΑΝΑΛΥΤΙΚΑ τι έκανες
+WordPress: {request.wp_url}
+User: {request.wp_user}
+Pass: {request.wp_pass}
+Task: {request.task}
 """
 
         agent = Agent(
             task=full_task,
             llm=llm,
-            use_vision=True,
+            use_vision=False,
             browser_profile=BrowserProfile(
                 headless=True,
-                slow_mo=500,
-                timeout=60000,
-                wait_until="networkidle",
-                disable_security=False
+                slow_mo=100,
+                timeout=90000,
+                wait_until="domcontentloaded",
+                disable_security=True,
+                extra_chromium_args=[
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-extensions',
+                ]
             )
         )
 
         result = await agent.run()
+        output = str(result) if result else "Done"
         
-        output = ""
-        if hasattr(result, 'final_result'):
-            output = str(result.final_result())
-        elif hasattr(result, 'history') and result.history:
-            output = "\n\n".join([str(h) for h in result.history[-5:]])
-        else:
-            output = str(result)
-        
-        return {
-            "success": True, 
-            "result": output,
-            "model_used": "gpt-4o-mini"
-        }
+        return {"success": True, "result": output}
 
     except Exception as e:
-        import traceback
-        return {
-            "success": False, 
-            "error": f"{type(e).__name__}: {str(e)}",
-            "traceback": traceback.format_exc()
-        }
+        return {"success": False, "error": str(e)}
+    
+    finally:
+        if agent:
+            try:
+                await agent.browser.close()
+            except:
+                pass
+        gc.collect()
 
 @app.get("/health")
 def health():
-    return {
-        "status": "ok",
-        "message": "Browser Agent Pro LIVE!",
-        "version": "3.0.0 - Enhanced Logging"
-    }
+    return {"status": "ok"}
 
 @app.get("/")
 def root():
-    return {
-        "name": "Browser Agent Pro API",
-        "endpoints": {
-            "POST /execute": "Run task (regular)",
-            "POST /execute-stream": "Run task (streaming with detailed logs)",
-            "GET /health": "Health check"
-        }
-    }
+    return {"name": "Browser Agent API", "version": "3.0.0-optimized"}
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
