@@ -1,9 +1,13 @@
 services:
   - type: web
     name: browser-agent
-    env: python
-    plan: free
-    buildCommand: pip install -r requirements.txt
+    runtime: python
+    buildCommand: |
+      pip install -r requirements.txt
+      playwright install --with-deps chromium
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
-      PORT: "8000"
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: /opt/render/.playwright
+      - key: PYTHONUNBUFFERED
+        value: "1"
