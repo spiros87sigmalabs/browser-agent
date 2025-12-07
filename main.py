@@ -168,7 +168,6 @@ async def stream_agent_logs(request: TaskRequest):
     """Stream agent execution logs with enhanced error handling"""
     log_queue = asyncio.Queue()
     agent = None
-    browser_restarted = False
     
     try:
         logger.info(f"🚀 New task: {request.task[:100]}")
@@ -233,16 +232,16 @@ IMPORTANT:
             task=full_task,
             llm=llm,
             use_vision=False,
-            max_actions_per_step=3,  # Μειωμένο από 5
+            max_actions_per_step=3,
             browser_profile=BrowserProfile(
                 headless=True,
-                slow_mo=800,  # Πιο αργό για σταθερότητα
-                timeout=180000,  # 3 λεπτά
+                slow_mo=800,
+                timeout=180000,
                 wait_until="networkidle",
                 disable_security=True,
                 extra_chromium_args=[
                     # ΚΡΙΣΙΜΑ για Railway
-                    '--single-process',  # ⚠️ Ένα process μόνο
+                    '--single-process',
                     '--no-zygote',
                     '--disable-dev-shm-usage',
                     '--disable-gpu',
@@ -250,7 +249,7 @@ IMPORTANT:
                     '--disable-setuid-sandbox',
                     
                     # Memory optimization
-                    '--js-flags=--max-old-space-size=384',  # Περιορισμός JS memory
+                    '--js-flags=--max-old-space-size=384',
                     '--disable-features=IsolateOrigins,site-per-process',
                     '--disable-site-isolation-trials',
                     
@@ -274,7 +273,7 @@ IMPORTANT:
                     '--disable-ipc-flooding-protection',
                     
                     # Display
-                    '--window-size=1366,768',  # Μικρότερο viewport
+                    '--window-size=1366,768',
                     '--disable-infobars',
                     '--force-device-scale-factor=1',
                     
@@ -295,12 +294,14 @@ IMPORTANT:
         # Execute task με error recovery
         async def run_task_with_recovery():
             max_retries = 2
+            last_result = None
+            
             for attempt in range(max_retries):
                 try:
                     logger.info(f"🎯 Task execution attempt {attempt+1}/{max_retries}")
-                    result = await agent.run()
+                    last_result = await agent.run()
                     logger.info("✅ Task completed successfully")
-                    return result
+                    return last_result  # Επιστρέφει το result
                 except Exception as e:
                     error_str = str(e)
                     logger.error(f"❌ Attempt {attempt+1} failed: {error_str}")
@@ -308,14 +309,18 @@ IMPORTANT:
                     # Αν είναι connection error και έχουμε άλλη προσπάθεια
                     if attempt < max_retries - 1 and ('ConnectionClosed' in error_str or 'close frame' in error_str):
                         logger.warning("🔄 Connection lost, preparing retry...")
-                        yield f"data: {json.dumps({'type': 'warning', 'message': '⚠️ Connection issue, retrying...', 'step': 0})}\n\n"
+                        # Στείλε warning στο stream
+                        await log_queue.put({
+                            'type': 'warning',
+                            'message': '⚠️ Connection issue, retrying...',
+                            'step': 0
+                        })
                         
                         # Κλείσιμο και cleanup
                         await safe_close_browser(agent)
                         await aggressive_cleanup()
                         await asyncio.sleep(3)
                         
-                        # Δεν ξανα-δημιουργούμε agent εδώ, απλά retry
                         logger.info("🔄 Retrying task...")
                         continue
                     else:
@@ -335,7 +340,7 @@ IMPORTANT:
                     
                     # Periodic health check
                     current_time = asyncio.get_event_loop().time()
-                    if current_time - last_health_check > 30:  # Κάθε 30 δευτερόλεπτα
+                    if current_time - last_health_check > 30:
                         if not await check_browser_health(agent):
                             logger.warning("⚠️ Browser health check failed!")
                             yield {'type': 'warning', 'message': '⚠️ Browser may be unstable', 'step': 0}
@@ -354,31 +359,38 @@ IMPORTANT:
         while not task.done():
             try:
                 log_data = await asyncio.wait_for(log_gen.__anext__(), timeout=5.0)
-                if isinstance(log_data, dict):  # Regular log
+                if isinstance(log_data, dict):
                     yield f"data: {json.dumps(log_data)}\n\n"
             except asyncio.TimeoutError:
                 yield f"data: {json.dumps({'type': 'info', 'message': '⏳ Processing...', 'step': 0})}\n\n"
             except StopAsyncIteration:
                 break
         
-        # Get result
-        result = await task
+        # Get result - ΣΗΜΑΝΤΙΚΟ: Χρησιμοποιούμε await εδώ
+        try:
+            result = await task
+        except Exception as e:
+            logger.error(f"Task failed: {e}")
+            result = None
         
         logger.info("✅ Task completed successfully!")
         log_memory_usage()
         yield f"data: {json.dumps({'type': 'success', 'message': '✅ Task completed!', 'step': 999})}\n\n"
         
         # Stream result
-        output = str(result) if result else "Task completed - no detailed output available"
-        result_lines = output.split('\n')
-        
-        for i, line in enumerate(result_lines[:10]):
-            if line.strip():
-                logger.info(f"Result [{i+1}]: {line[:200]}")
-                yield f"data: {json.dumps({'type': 'result', 'message': line[:250], 'step': 999})}\n\n"
-        
-        if len(result_lines) > 10:
-            yield f"data: {json.dumps({'type': 'result', 'message': f'... και {len(result_lines)-10} ακόμα γραμμές', 'step': 999})}\n\n"
+        if result:
+            output = str(result)
+            result_lines = output.split('\n')
+            
+            for i, line in enumerate(result_lines[:10]):
+                if line.strip():
+                    logger.info(f"Result [{i+1}]: {line[:200]}")
+                    yield f"data: {json.dumps({'type': 'result', 'message': line[:250], 'step': 999})}\n\n"
+            
+            if len(result_lines) > 10:
+                yield f"data: {json.dumps({'type': 'result', 'message': f'... και {len(result_lines)-10} ακόμα γραμμές', 'step': 999})}\n\n"
+        else:
+            yield f"data: {json.dumps({'type': 'result', 'message': 'Task completed - no detailed output', 'step': 999})}\n\n"
         
         yield f"data: {json.dumps({'type': 'done', 'message': '🎉 Ολοκληρώθηκε!', 'step': 999})}\n\n"
         
@@ -487,7 +499,7 @@ def health():
     return {
         "status": "ok", 
         "service": "browser-agent", 
-        "version": "3.3.0-stable",
+        "version": "3.3.1-fixed",
         "memory_mb": round(mem_usage, 2)
     }
 
@@ -496,13 +508,14 @@ def root():
     """Root endpoint"""
     return {
         "name": "Browser Agent API",
-        "version": "3.3.0-stable",
+        "version": "3.3.1-fixed",
         "status": "operational",
         "features": [
             "Enhanced error recovery",
             "Memory optimization",
             "Connection retry logic",
-            "Health monitoring"
+            "Health monitoring",
+            "Fixed async generator syntax"
         ],
         "endpoints": {
             "stream": "/execute-stream",
@@ -521,5 +534,6 @@ if __name__ == "__main__":
         app, 
         host="0.0.0.0", 
         port=port,
-        timeout_keep_alive=300  # 5 λεπτά keep-alive
+        timeout_keep_alive=300
     )
+
