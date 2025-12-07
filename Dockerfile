@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM python:3.11-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -21,16 +21,22 @@ RUN apt-get update && apt-get install -y \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Set chromium path so BrowserUse can find it
+# Set chromium path
 ENV BROWSER_USE_CHROMIUM_PATH=/usr/bin/chromium
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright
 
 WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install Playwright Chromium
+RUN playwright install chromium --with-deps
+
 COPY . .
 
+# Railway uses PORT env variable
+ENV PORT=8080
 EXPOSE 8080
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]
