@@ -1,12 +1,19 @@
-FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
+FROM python:3.11-slim
 
 WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    wget \
+    gnupg \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+# Install Playwright browsers
+RUN playwright install --with-deps chromium
 
-EXPOSE 8000
+COPY . .
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
