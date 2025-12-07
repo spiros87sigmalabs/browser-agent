@@ -1,47 +1,55 @@
 FROM python:3.11-slim
 
-ENV DEBIAN_FRONTEND=noninteractive
-
 WORKDIR /app
 
-# Install system deps for Chromium + Playwright
+# Install system dependencies + CHROMIUM
 RUN apt-get update && apt-get install -y \
     wget \
-    curl \
-    unzip \
+    ca-certificates \
     gnupg \
     xvfb \
-    libnss3 \
-    libxss1 \
-    libasound2 \
+    chromium \
+    chromium-driver \
     fonts-liberation \
-    libappindicator3-1 \
+    libasound2 \
     libatk1.0-0 \
     libatk-bridge2.0-0 \
-    libgtk-3-0 \
-    libgbm1 \
-    libxkbcommon0 \
-    libxcomposite1 \
-    libxrandr2 \
-    libxdamage1 \
-    libatspi2.0-0 \
+    libc6 \
+    libcairo2 \
     libcups2 \
-    libdrm2 \
+    libdbus-1-3 \
+    libexpat1 \
+    libfontconfig1 \
+    libgcc1 \
+    libglib2.0-0 \
+    libgtk-3-0 \
+    libnss3 \
     libpango-1.0-0 \
-    libpangocairo-1.0-0 \
-    libxshmfence1 \
-    && rm -rf /var/lib/apt/lists/*
+    libx11-6 \
+    libx11-xcb1 \
+    libxcb1 \
+    libxcomposite1 \
+    libxcursor1 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxi6 \
+    libxrandr2 \
+    libxrender1 \
+    libxss1 \
+    libxtst6 \
+    lsb-release \
+    xdg-utils \
+    --no-install-recommends && \
+    rm -rf /var/lib/apt/lists/*
 
-# Install python deps
+ENV CHROME_PATH=/usr/bin/chromium
+ENV BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers (Chromium included)
-RUN python -m playwright install chromium
-
 COPY . .
-
-EXPOSE 8080
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
 
