@@ -8,6 +8,7 @@ import asyncio
 import logging
 import re
 import gc
+import sys
 
 from browser_use import Agent, ChatOpenAI
 from browser_use.browser import BrowserProfile
@@ -21,6 +22,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 🔥 RAILWAY CONSOLE LOGGING
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)],
+    force=True
+)
+logger = logging.getLogger(__name__)
 
 class TaskRequest(BaseModel):
     task: str
@@ -70,6 +80,10 @@ class LogCapture(logging.Handler):
     def emit(self, record):
         try:
             msg = self.format(record)
+            
+            # 🔥 PRINT TO RAILWAY CONSOLE
+            print(f"[AGENT] {msg}", flush=True)
+            
             log_type, message, step = parse_log_line(msg)
             if log_type and message:
                 self.queue.put_nowait({
@@ -77,8 +91,8 @@ class LogCapture(logging.Handler):
                     'message': message,
                     'step': step
                 })
-        except:
-            pass
+        except Exception as e:
+            print(f"[ERROR] LogCapture failed: {e}", flush=True)
 
 async def stream_agent_logs(request: TaskRequest):
     """Streaming με memory optimization"""
@@ -86,15 +100,17 @@ async def stream_agent_logs(request: TaskRequest):
     agent = None
     
     try:
+        logger.info(f"🚀 Starting task: {request.task[:100]}")
+        
         # Setup logging
         for logger_name in ['browser_use']:
-            logger = logging.getLogger(logger_name)
-            logger.setLevel(logging.INFO)
-            logger.handlers.clear()
+            log = logging.getLogger(logger_name)
+            log.setLevel(logging.INFO)
+            log.handlers.clear()
             
             handler = LogCapture(log_queue)
             handler.setFormatter(logging.Formatter('%(message)s'))
-            logger.addHandler(handler)
+            log.addHandler(handler)
         
         yield f"data: {json.dumps({'type': 'system', 'message': '🚀 Starting...', 'step': 0})}\n\n"
         
@@ -118,6 +134,8 @@ STEPS:
 4. Report what you did
 """
         
+        logger.info("🔧 Initializing browser agent...")
+        
         # MEMORY-OPTIMIZED BROWSER
         agent = Agent(
             task=full_task,
@@ -131,11 +149,11 @@ STEPS:
                 disable_security=True,
                 # 🔥 MEMORY OPTIMIZATION
                 extra_chromium_args=[
-                    '--disable-dev-shm-usage',  # Μην χρησιμοποιείς /dev/shm
-                    '--disable-gpu',  # No GPU
-                    '--no-sandbox',  # No sandbox
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--no-sandbox',
                     '--disable-setuid-sandbox',
-                    '--disable-extensions',  # No extensions
+                    '--disable-extensions',
                     '--disable-background-networking',
                     '--disable-background-timer-throttling',
                     '--disable-backgrounding-occluded-windows',
@@ -148,12 +166,13 @@ STEPS:
                     '--no-first-run',
                     '--safebrowsing-disable-auto-update',
                     '--disable-blink-features=AutomationControlled',
-                    '--window-size=1280,720',  # Μικρότερο window
+                    '--window-size=1280,720',
                     '--disable-infobars',
                 ]
             )
         )
         
+        logger.info("✅ Chrome ready, starting execution...")
         yield f"data: {json.dumps({'type': 'system', 'message': '🔥 Chrome ready', 'step': 0})}\n\n"
         
         # Run agent
@@ -183,17 +202,20 @@ STEPS:
         
         result = await task
         
+        logger.info("✅ Task completed!")
         yield f"data: {json.dumps({'type': 'success', 'message': '✅ Done!', 'step': 999})}\n\n"
         
         # Result
         output = str(result) if result else "No output"
         for line in output.split('\n')[:8]:
             if line.strip():
+                logger.info(f"Result: {line[:150]}")
                 yield f"data: {json.dumps({'type': 'result', 'message': line[:200], 'step': 999})}\n\n"
         
         yield f"data: {json.dumps({'type': 'done', 'message': '🎉 Complete', 'step': 999})}\n\n"
         
     except Exception as e:
+        logger.error(f"❌ Error: {str(e)}", exc_info=True)
         yield f"data: {json.dumps({'type': 'error', 'message': f'❌ {str(e)}', 'step': 0})}\n\n"
     
     finally:
@@ -201,16 +223,19 @@ STEPS:
         if agent:
             try:
                 await agent.browser.close()
+                logger.info("🧹 Browser closed")
             except:
                 pass
         
         # Force garbage collection
         gc.collect()
+        logger.info("🧹 Cleanup done")
         
         yield f"data: {json.dumps({'type': 'system', 'message': '🧹 Cleanup done', 'step': 0})}\n\n"
 
 @app.post("/execute-stream")
 async def execute_task_stream(request: TaskRequest):
+    logger.info(f"📥 Stream request: {request.task[:50]}...")
     return StreamingResponse(
         stream_agent_logs(request),
         media_type="text/event-stream",
@@ -225,6 +250,8 @@ async def execute_task_stream(request: TaskRequest):
 async def execute_task(request: TaskRequest):
     agent = None
     try:
+        logger.info(f"📥 Execute request: {request.task[:50]}...")
+        
         llm = ChatOpenAI(
             model="gpt-4o-mini",
             api_key=request.openai_api_key
@@ -260,9 +287,11 @@ Task: {request.task}
         result = await agent.run()
         output = str(result) if result else "Done"
         
+        logger.info("✅ Task completed!")
         return {"success": True, "result": output}
 
     except Exception as e:
+        logger.error(f"❌ Error: {str(e)}", exc_info=True)
         return {"success": False, "error": str(e)}
     
     finally:
@@ -279,7 +308,7 @@ def health():
 
 @app.get("/")
 def root():
-    return {"name": "Browser Agent API", "version": "3.0.0-optimized"}
+    return {"name": "Browser Agent API", "version": "3.1.0-railway"}
 
 if __name__ == "__main__":
     import uvicorn
