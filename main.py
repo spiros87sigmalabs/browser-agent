@@ -5,6 +5,9 @@ from pydantic import BaseModel
 import os
 import json
 import asyncio
+import logging
+import sys
+from io import StringIO
 
 from browser_use import Agent, ChatOpenAI
 from browser_use.browser import BrowserProfile
@@ -26,15 +29,44 @@ class TaskRequest(BaseModel):
     wp_pass: str
     openai_api_key: str
 
-async def stream_agent_logs(request: TaskRequest):
-    """Generator που στέλνει real-time updates"""
-    try:
-        # Αρχικό μήνυμα
-        yield f"data: {json.dumps({'type': 'info', 'message': '🚀 Εκκίνηση AI Agent...'})}\n\n"
-        await asyncio.sleep(0.5)
+class LogCapture(logging.Handler):
+    """Custom handler που capture τα logs του browser_use"""
+    def __init__(self, queue):
+        super().__init__()
+        self.queue = queue
         
-        yield f"data: {json.dumps({'type': 'info', 'message': f'🌐 Σύνδεση στο {request.wp_url}'})}\n\n"
-        await asyncio.sleep(0.5)
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            self.queue.put_nowait({
+                'level': record.levelname,
+                'message': msg,
+                'module': record.module
+            })
+        except:
+            pass
+
+async def stream_agent_logs(request: TaskRequest):
+    """Generator με detailed streaming logs"""
+    try:
+        # Δημιουργία queue για logs
+        log_queue = asyncio.Queue()
+        
+        # Setup custom logger για browser_use
+        browser_logger = logging.getLogger('browser_use')
+        browser_logger.setLevel(logging.INFO)
+        
+        # Προσθήκη custom handler
+        handler = LogCapture(log_queue)
+        handler.setFormatter(logging.Formatter('%(message)s'))
+        browser_logger.addHandler(handler)
+        
+        # Αρχικά μηνύματα
+        yield f"data: {json.dumps({'type': 'info', 'message': '🚀 Εκκίνηση AI Agent Pro...', 'step': 0})}\n\n"
+        await asyncio.sleep(0.3)
+        
+        yield f"data: {json.dumps({'type': 'info', 'message': f'🌐 Target: {request.wp_url}', 'step': 0})}\n\n"
+        await asyncio.sleep(0.3)
         
         # Δημιουργία LLM
         llm = ChatOpenAI(
@@ -54,11 +86,11 @@ Password: {request.wp_pass}
 2. Συμπλήρωσε Username: {request.wp_user}
 3. Συμπλήρωσε Password: {request.wp_pass}
 4. Πάτα "Σύνδεση" ή "Log In"
-5. Εκτέλεσε την εργασία βήμα-βήμα
+5. Εκτέλεσε την εργασία βήμα-βήμα με προσοχή
 6. Στο τέλος γράψε ΑΝΑΛΥΤΙΚΑ τι έκανες
 """
         
-        yield f"data: {json.dumps({'type': 'info', 'message': '🤖 Δημιουργία AI Agent...'})}\n\n"
+        yield f"data: {json.dumps({'type': 'system', 'message': '🤖 Initializing AI Brain...', 'step': 0})}\n\n"
         
         # Δημιουργία agent
         agent = Agent(
@@ -74,42 +106,88 @@ Password: {request.wp_pass}
             )
         )
         
-        yield f"data: {json.dumps({'type': 'info', 'message': '🔥 Άνοιγμα Chrome browser...'})}\n\n"
-        await asyncio.sleep(0.5)
+        yield f"data: {json.dumps({'type': 'system', 'message': '🔥 Launching Chrome Browser...', 'step': 0})}\n\n"
+        await asyncio.sleep(0.3)
         
-        # Εκτέλεση με callback για real-time updates
-        step_count = 0
+        # Task για εκτέλεση agent
+        async def run_agent():
+            return await agent.run()
         
-        # Custom callback για κάθε action
-        async def action_callback(action_info):
-            nonlocal step_count
-            step_count += 1
+        # Task για monitoring logs
+        async def monitor_logs():
+            step_counter = 0
+            while True:
+                try:
+                    log_entry = await asyncio.wait_for(log_queue.get(), timeout=0.1)
+                    
+                    msg = log_entry['message']
+                    
+                    # Parse διαφορετικά types
+                    if '📍 Step' in msg:
+                        step_counter += 1
+                        step_num = msg.split('Step')[1].split(':')[0].strip()
+                        yield f"data: {json.dumps({'type': 'step', 'message': f'📍 Step {step_num}', 'step': step_counter})}\n\n"
+                    
+                    elif '👍 Eval:' in msg:
+                        eval_text = msg.split('Eval:')[1].strip()
+                        yield f"data: {json.dumps({'type': 'eval', 'message': f'👍 {eval_text}', 'step': step_counter})}\n\n"
+                    
+                    elif '🧠 Memory:' in msg:
+                        memory_text = msg.split('Memory:')[1].strip()
+                        yield f"data: {json.dumps({'type': 'memory', 'message': f'🧠 {memory_text}', 'step': step_counter})}\n\n"
+                    
+                    elif '🎯 Next goal:' in msg:
+                        goal_text = msg.split('Next goal:')[1].strip()
+                        yield f"data: {json.dumps({'type': 'goal', 'message': f'🎯 {goal_text}', 'step': step_counter})}\n\n"
+                    
+                    elif '▶️' in msg:
+                        action_text = msg.split('▶️')[1].strip()
+                        yield f"data: {json.dumps({'type': 'action', 'message': f'▶️ {action_text}', 'step': step_counter})}\n\n"
+                    
+                    elif '🖱️' in msg or 'click' in msg.lower():
+                        yield f"data: {json.dumps({'type': 'action', 'message': f'🖱️ {msg}', 'step': step_counter})}\n\n"
+                    
+                    elif '⌨️' in msg or 'type' in msg.lower():
+                        yield f"data: {json.dumps({'type': 'action', 'message': f'⌨️ {msg}', 'step': step_counter})}\n\n"
+                    
+                    elif '🧭' in msg or 'navigate' in msg.lower():
+                        yield f"data: {json.dumps({'type': 'action', 'message': f'🧭 {msg}', 'step': step_counter})}\n\n"
+                    
+                    elif 'ERROR' in log_entry['level']:
+                        yield f"data: {json.dumps({'type': 'error', 'message': f'❌ {msg}', 'step': step_counter})}\n\n"
+                    
+                    else:
+                        # Generic info
+                        yield f"data: {json.dumps({'type': 'info', 'message': msg, 'step': step_counter})}\n\n"
+                    
+                    await asyncio.sleep(0.05)
+                    
+                except asyncio.TimeoutError:
+                    await asyncio.sleep(0.1)
+                    continue
+                except Exception as e:
+                    break
+        
+        # Εκτέλεση παράλληλα
+        agent_task = asyncio.create_task(run_agent())
+        
+        # Stream logs
+        async for log_data in monitor_logs():
+            yield log_data
             
-            # Παίρνουμε info από το action
-            action_type = action_info.get('action', 'unknown')
-            action_data = action_info.get('data', {})
-            
-            if action_type == 'click':
-                msg = f"🖱️ Βήμα {step_count}: Κλικ σε '{action_data.get('element', 'στοιχείο')}'"
-            elif action_type == 'type':
-                msg = f"⌨️ Βήμα {step_count}: Γράφω '{action_data.get('text', '...')}'"
-            elif action_type == 'navigate':
-                msg = f"🧭 Βήμα {step_count}: Μετάβαση στο {action_data.get('url', 'νέα σελίδα')}"
-            elif action_type == 'wait':
-                msg = f"⏱️ Βήμα {step_count}: Αναμονή..."
-            else:
-                msg = f"⚡ Βήμα {step_count}: {action_type}"
-            
-            yield f"data: {json.dumps({'type': 'info', 'message': msg})}\n\n"
+            # Check αν τελείωσε το agent
+            if agent_task.done():
+                break
         
-        # Εκτέλεση
-        yield f"data: {json.dumps({'type': 'warning', 'message': '🧠 AI σκέφτεται...'})}\n\n"
+        # Περίμενε να τελειώσει
+        result = await agent_task
         
-        result = await agent.run()
+        # Cleanup
+        browser_logger.removeHandler(handler)
         
         # Τελικό αποτέλεσμα
-        yield f"data: {json.dumps({'type': 'success', 'message': '✅ Task ολοκληρώθηκε!'})}\n\n"
-        await asyncio.sleep(0.5)
+        yield f"data: {json.dumps({'type': 'success', 'message': '✅ Task Completed Successfully!', 'step': 999})}\n\n"
+        await asyncio.sleep(0.3)
         
         # Parse result
         output = ""
@@ -120,28 +198,29 @@ Password: {request.wp_pass}
         else:
             output = str(result)
         
-        # Στείλε το τελικό output
-        for line in output.split('\n')[:10]:  # Πρώτες 10 γραμμές
-            if line.strip():
-                yield f"data: {json.dumps({'type': 'result', 'message': f'📄 {line}'})}\n\n"
-                await asyncio.sleep(0.2)
+        # Στείλε summary
+        yield f"data: {json.dumps({'type': 'result', 'message': '📋 SUMMARY', 'step': 999})}\n\n"
         
-        yield f"data: {json.dumps({'type': 'done', 'message': '🎉 Όλα έτοιμα!'})}\n\n"
+        for line in output.split('\n')[:15]:
+            if line.strip():
+                yield f"data: {json.dumps({'type': 'result', 'message': line.strip(), 'step': 999})}\n\n"
+                await asyncio.sleep(0.1)
+        
+        yield f"data: {json.dumps({'type': 'done', 'message': '🎉 All Done!', 'step': 999})}\n\n"
         
     except Exception as e:
         import traceback
         error_msg = f"{type(e).__name__}: {str(e)}"
-        yield f"data: {json.dumps({'type': 'error', 'message': f'❌ Σφάλμα: {error_msg}'})}\n\n"
+        yield f"data: {json.dumps({'type': 'error', 'message': f'❌ Fatal Error: {error_msg}', 'step': 0})}\n\n"
         
-        # Στείλε και το traceback
         tb = traceback.format_exc()
-        for line in tb.split('\n')[:5]:
+        for line in tb.split('\n')[:8]:
             if line.strip():
-                yield f"data: {json.dumps({'type': 'error', 'message': line})}\n\n"
+                yield f"data: {json.dumps({'type': 'error', 'message': line, 'step': 0})}\n\n"
 
 @app.post("/execute-stream")
 async def execute_task_stream(request: TaskRequest):
-    """Streaming endpoint για real-time updates"""
+    """Streaming endpoint με detailed logs"""
     return StreamingResponse(
         stream_agent_logs(request),
         media_type="text/event-stream",
@@ -218,17 +297,17 @@ Password: {request.wp_pass}
 def health():
     return {
         "status": "ok",
-        "message": "Browser Agent LIVE!",
-        "version": "2.0.0 - Streaming Edition"
+        "message": "Browser Agent Pro LIVE!",
+        "version": "3.0.0 - Enhanced Logging"
     }
 
 @app.get("/")
 def root():
     return {
-        "name": "Browser Agent API",
+        "name": "Browser Agent Pro API",
         "endpoints": {
             "POST /execute": "Run task (regular)",
-            "POST /execute-stream": "Run task (streaming)",
+            "POST /execute-stream": "Run task (streaming with detailed logs)",
             "GET /health": "Health check"
         }
     }
@@ -237,3 +316,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
